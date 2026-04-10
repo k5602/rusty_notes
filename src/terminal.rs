@@ -1,23 +1,24 @@
-use std::io::{self, stdout, Stdout};
+use std::io::{Stdout, stdout};
 
+use anyhow::Result;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     crossterm::{
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
-    Terminal,
 };
 
 pub type Tui = Terminal<CrosstermBackend<Stdout>>;
 
-pub fn init() -> io::Result<Tui> {
+pub fn init() -> Result<Tui> {
     execute!(stdout(), EnterAlternateScreen)?;
     enable_raw_mode()?;
-    Terminal::new(CrosstermBackend::new(stdout()))
+    Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
 }
 
-pub fn restore() -> io::Result<()> {
+pub fn restore() -> Result<()> {
     execute!(stdout(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())

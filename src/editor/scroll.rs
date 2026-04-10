@@ -4,7 +4,9 @@ const SCROLL_DISTANCE: usize = 5;
 
 impl Editor {
     pub fn focus_scroll_on_cursor(&mut self) {
-        if !self.text.focus { return; }
+        if !self.text.focus {
+            return;
+        }
 
         self.text.focus = false;
 
