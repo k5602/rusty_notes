@@ -3,10 +3,10 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::Stylize,
+    style::{Color, Stylize},
     symbols::border,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 mod copy_paste;
@@ -15,11 +15,13 @@ mod editor_state;
 mod scroll;
 mod search;
 mod text;
+mod undo;
 
 pub use cursor::Cursor;
 pub use editor_state::EditorState;
 pub use search::{Replace, Search};
 pub use text::Text;
+pub use undo::UndoStack;
 
 use crate::action::Action;
 use crate::note::Note;
@@ -34,6 +36,8 @@ pub struct Editor {
     pub screen_size: (u16, u16),
     pub write: bool,
     pub side_panel: bool,
+    pub show_help: bool,
+    undo_stack: UndoStack,
 }
 
 impl Editor {
@@ -48,6 +52,8 @@ impl Editor {
             screen_size: (0, 0),
             write: false,
             side_panel: true,
+            show_help: false,
+            undo_stack: UndoStack::new(),
         }
     }
 
@@ -61,11 +67,20 @@ impl Editor {
             screen_size: (0, 0),
             write: false,
             side_panel: true,
+            show_help: false,
+            undo_stack: UndoStack::new(),
         }
     }
 
     pub fn current_note_text(&self) -> String {
         self.text.lines.join("\n")
+    }
+
+    fn save_snapshot(&mut self) {
+        self.undo_stack.push(undo::Snapshot {
+            text: self.text.clone(),
+            cursor: self.text.cursor,
+        });
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Action {
@@ -114,10 +129,36 @@ impl Editor {
                     self.scroll_down();
                     return Action::Noop;
                 }
+                KeyCode::Char('z') => {
+                    if let Some(snapshot) = self.undo_stack.undo(undo::Snapshot {
+                        text: self.text.clone(),
+                        cursor: self.text.cursor,
+                    }) {
+                        self.text = snapshot.text;
+                        self.text.focus = true;
+                        self.write = true;
+                    }
+                    return Action::Noop;
+                }
+                KeyCode::Char('y') => {
+                    if let Some(snapshot) = self.undo_stack.redo(undo::Snapshot {
+                        text: self.text.clone(),
+                        cursor: self.text.cursor,
+                    }) {
+                        self.text = snapshot.text;
+                        self.text.focus = true;
+                        self.write = true;
+                    }
+                    return Action::Noop;
+                }
                 _ => {}
             }
         } else {
             match key.code {
+                KeyCode::Char('?') => {
+                    self.show_help = !self.show_help;
+                    return Action::Noop;
+                }
                 KeyCode::Esc => {
                     self.state = EditorState::Exit;
                     return Action::BackToTitle;
@@ -149,6 +190,7 @@ impl Editor {
             }
         }
 
+        self.save_snapshot();
         text_input(&mut self.text, &key);
         self.write = true;
         self.focus_scroll_on_cursor();
@@ -158,6 +200,9 @@ impl Editor {
     fn handle_search(&mut self, key: KeyEvent) -> Action {
         if let EditorState::Search(ref mut search) = self.state {
             match key.code {
+                KeyCode::Char('?') => {
+                    self.show_help = !self.show_help;
+                }
                 KeyCode::Esc => {
                     self.state = EditorState::Edit;
                     return Action::Noop;
@@ -177,6 +222,9 @@ impl Editor {
     fn handle_replace(&mut self, key: KeyEvent) -> Action {
         if let EditorState::Replace(ref mut replace) = self.state {
             match key.code {
+                KeyCode::Char('?') => {
+                    self.show_help = !self.show_help;
+                }
                 KeyCode::Esc => {
                     self.state = EditorState::Edit;
                     return Action::Noop;
@@ -216,6 +264,91 @@ impl Editor {
         } else {
             self.render_editor_area(f, f.area());
         }
+
+        if self.show_help {
+            self.render_help_overlay(f);
+        }
+    }
+
+    fn render_help_overlay(&self, f: &mut Frame) {
+        let area = centered_rect(50, 20, f.area());
+
+        f.render_widget(Clear, area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .title("Keyboard Shortcuts")
+            .on_dark_gray();
+
+        let g = Color::Green;
+        let w = Color::White;
+
+        let lines = vec![
+            Line::from(""),
+            Line::from(vec![Span::styled("  Navigation:", w)]),
+            Line::from(vec![
+                Span::styled("    ← → ↑ ↓           ", g),
+                Span::styled("Move cursor", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Home/End          ", g),
+                Span::styled("Start/End of line", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    PgUp/PgDn         ", g),
+                Span::styled("Scroll page", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+↑/↓          ", g),
+                Span::styled("Scroll view", w),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled("  Editing:", w)]),
+            Line::from(vec![
+                Span::styled("    Ctrl+W            ", g),
+                Span::styled("Save note", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+Q / Esc      ", g),
+                Span::styled("Back to title", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+Z            ", g),
+                Span::styled("Undo", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+Y            ", g),
+                Span::styled("Redo", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+T            ", g),
+                Span::styled("Toggle task checkbox", w),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled("  Search & Replace:", w)]),
+            Line::from(vec![
+                Span::styled("    Ctrl+F            ", g),
+                Span::styled("Search", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    Ctrl+R            ", g),
+                Span::styled("Replace", w),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled("  Other:", w)]),
+            Line::from(vec![
+                Span::styled("    Ctrl+J            ", g),
+                Span::styled("Toggle side panel", w),
+            ]),
+            Line::from(vec![
+                Span::styled("    ?                 ", g),
+                Span::styled("Toggle this help", w),
+            ]),
+        ];
+
+        let paragraph = Paragraph::new(lines).block(block);
+        f.render_widget(paragraph, area);
     }
 
     fn render_editor_area(&mut self, f: &mut Frame, rect: Rect) {
@@ -313,7 +446,10 @@ impl Editor {
             })
             .sum();
 
-        let lines = vec![
+        let full_text = self.text.lines.join("\n");
+        let tags = crate::database::extract_tags(&full_text);
+
+        let mut lines = vec![
             Line::from("Date:"),
             Line::from(self.creation_date.format("%d/%m/%Y").to_string()),
             Line::from(""),
@@ -322,6 +458,19 @@ impl Editor {
             Line::from(""),
             Line::from(format!("Words: {}", word_count)),
         ];
+
+        if !tags.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Tags:"));
+            let tag_line = tags
+                .iter()
+                .map(|t| format!("#{}", t))
+                .collect::<Vec<_>>()
+                .join(" ");
+            for chunk in tag_line.as_bytes().chunks(20) {
+                lines.push(Line::from(String::from_utf8_lossy(chunk).to_string()));
+            }
+        }
 
         let paragraph = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
@@ -534,4 +683,13 @@ fn get_month_in_lines(date: NaiveDate) -> Vec<Line<'static>> {
 
     lines.push(line);
     lines
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    Rect::new(
+        (area.width.saturating_sub(width)) / 2,
+        (area.height.saturating_sub(height)) / 2,
+        width.min(area.width),
+        height.min(area.height),
+    )
 }

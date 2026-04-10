@@ -1,8 +1,51 @@
+use std::collections::HashSet;
+
 use anyhow::Result;
 use chrono::{Local, NaiveDate};
 use rusqlite::{Connection, params};
 
 use crate::note::Note;
+
+pub fn extract_tags(text: &str) -> Vec<String> {
+    let mut tags = HashSet::new();
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+        if trimmed.starts_with('`') {
+            continue;
+        }
+
+        let mut chars = line.char_indices().peekable();
+        while let Some((_, c)) = chars.next() {
+            if c == '#' {
+                let mut tag = String::new();
+                while let Some(&(_, nc)) = chars.peek() {
+                    if nc.is_alphanumeric() || nc == '_' {
+                        tag.push(nc);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if !tag.is_empty() {
+                    tags.insert(tag);
+                }
+            }
+        }
+    }
+
+    let mut result: Vec<String> = tags.into_iter().collect();
+    result.sort();
+    result
+}
 
 pub struct Database {
     conn: Connection,
@@ -18,7 +61,16 @@ impl Database {
                 creation_date DATE NOT NULL UNIQUE,
                 last_edited DATETIME NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_note_creation_date ON note(creation_date);",
+            CREATE INDEX IF NOT EXISTS idx_note_creation_date ON note(creation_date);
+            CREATE TABLE IF NOT EXISTS tag (
+                id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE
+            );
+            CREATE TABLE IF NOT EXISTS note_tag (
+                note_id INTEGER NOT NULL REFERENCES note(id) ON DELETE CASCADE,
+                tag_id INTEGER NOT NULL REFERENCES tag(id) ON DELETE CASCADE,
+                PRIMARY KEY (note_id, tag_id)
+            );",
         )?;
         Ok(Self { conn })
     }
@@ -81,6 +133,12 @@ impl Database {
              ON CONFLICT(creation_date) DO UPDATE SET text = excluded.text, last_edited = excluded.last_edited",
             params![note.text, note.creation_date, note.last_edited],
         )?;
+        let note_id: i32 = self.conn.query_row(
+            "SELECT id FROM note WHERE creation_date = ?1",
+            params![note.creation_date],
+            |row| row.get(0),
+        )?;
+        self.sync_tags(note_id, &note.text)?;
         Ok(())
     }
 
@@ -149,6 +207,67 @@ impl Database {
         Ok(count as usize)
     }
 
+    pub fn sync_tags(&self, note_id: i32, text: &str) -> Result<()> {
+        let tags = extract_tags(text);
+        self.conn
+            .execute("DELETE FROM note_tag WHERE note_id = ?1", params![note_id])?;
+        for tag_name in &tags {
+            self.conn.execute(
+                "INSERT INTO tag (name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+                params![tag_name],
+            )?;
+            let tag_id: i32 = self.conn.query_row(
+                "SELECT id FROM tag WHERE name = ?1",
+                params![tag_name],
+                |row| row.get(0),
+            )?;
+            self.conn.execute(
+                "INSERT OR IGNORE INTO note_tag (note_id, tag_id) VALUES (?1, ?2)",
+                params![note_id, tag_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn get_all_tags(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT name FROM tag ORDER BY name")?;
+        let mut tags = Vec::new();
+        for tag in stmt.query_map([], |row| row.get::<_, String>(0))? {
+            tags.push(tag?);
+        }
+        Ok(tags)
+    }
+
+    pub fn get_notes_by_tag(&self, tag: &str) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT n.id, n.text, n.creation_date, n.last_edited
+             FROM note n
+             INNER JOIN note_tag nt ON n.id = nt.note_id
+             INNER JOIN tag t ON nt.tag_id = t.id
+             WHERE t.name = ?1
+             ORDER BY n.creation_date",
+        )?;
+        let mut notes = Vec::new();
+        for note in stmt.query_map(params![tag], Self::row_to_note)? {
+            notes.push(note?);
+        }
+        Ok(notes)
+    }
+
+    pub fn get_tags_for_note(&self, note_id: i32) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name FROM tag t
+             INNER JOIN note_tag nt ON t.id = nt.tag_id
+             WHERE nt.note_id = ?1
+             ORDER BY t.name",
+        )?;
+        let mut tags = Vec::new();
+        for tag in stmt.query_map(params![note_id], |row| row.get::<_, String>(0))? {
+            tags.push(tag?);
+        }
+        Ok(tags)
+    }
+
     pub fn append_to_note(&self, date: &NaiveDate, text: &str) -> Result<()> {
         let now = Local::now();
         match self.get_note_by_date(date)? {
@@ -162,6 +281,7 @@ impl Database {
                     "UPDATE note SET text = ?1, last_edited = ?2 WHERE id = ?3",
                     params![new_text, now, note.id],
                 )?;
+                self.sync_tags(note.id, &new_text)?;
             }
             None => {
                 let note = Note {
@@ -170,7 +290,8 @@ impl Database {
                     creation_date: *date,
                     last_edited: now,
                 };
-                self.insert_note(&note)?;
+                let id = self.insert_note(&note)?;
+                self.sync_tags(id, text)?;
             }
         }
         Ok(())

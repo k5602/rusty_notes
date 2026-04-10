@@ -1,6 +1,6 @@
 use chrono::{DateTime, Local, NaiveDate};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Note {
     pub id: i32,
     pub text: String,
