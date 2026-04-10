@@ -24,10 +24,10 @@ impl UndoStack {
     }
 
     pub fn push(&mut self, snapshot: Snapshot) {
-        if let Some(top) = self.undo_stack.last() {
-            if top.text.lines == snapshot.text.lines {
-                return;
-            }
+        if let Some(top) = self.undo_stack.last()
+            && top.text.lines == snapshot.text.lines
+        {
+            return;
         }
         self.undo_stack.push(snapshot);
         self.redo_stack.clear();

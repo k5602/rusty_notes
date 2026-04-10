@@ -151,14 +151,19 @@ impl Editor {
                     }
                     return Action::Noop;
                 }
-                _ => {}
-            }
-        } else {
-            match key.code {
+                KeyCode::Char('t') => {
+                    self.toggle_task_checkbox();
+                    self.write = true;
+                    return Action::Noop;
+                }
                 KeyCode::Char('?') => {
                     self.show_help = !self.show_help;
                     return Action::Noop;
                 }
+                _ => {}
+            }
+        } else {
+            match key.code {
                 KeyCode::Esc => {
                     self.state = EditorState::Exit;
                     return Action::BackToTitle;
@@ -200,9 +205,6 @@ impl Editor {
     fn handle_search(&mut self, key: KeyEvent) -> Action {
         if let EditorState::Search(ref mut search) = self.state {
             match key.code {
-                KeyCode::Char('?') => {
-                    self.show_help = !self.show_help;
-                }
                 KeyCode::Esc => {
                     self.state = EditorState::Edit;
                     return Action::Noop;
@@ -222,9 +224,6 @@ impl Editor {
     fn handle_replace(&mut self, key: KeyEvent) -> Action {
         if let EditorState::Replace(ref mut replace) = self.state {
             match key.code {
-                KeyCode::Char('?') => {
-                    self.show_help = !self.show_help;
-                }
                 KeyCode::Esc => {
                     self.state = EditorState::Edit;
                     return Action::Noop;
@@ -342,7 +341,7 @@ impl Editor {
                 Span::styled("Toggle side panel", w),
             ]),
             Line::from(vec![
-                Span::styled("    ?                 ", g),
+                Span::styled("    Ctrl+?           ", g),
                 Span::styled("Toggle this help", w),
             ]),
         ];
@@ -404,7 +403,7 @@ impl Editor {
             .text
             .lines
             .iter()
-            .map(|line| Line::from(format!("{} ", line)))
+            .map(|line| render_task_line(line))
             .collect();
 
         if let Some(selection_start) = &self.text.selection_start {
@@ -449,6 +448,19 @@ impl Editor {
         let full_text = self.text.lines.join("\n");
         let tags = crate::database::extract_tags(&full_text);
 
+        let total_tasks: usize = self
+            .text
+            .lines
+            .iter()
+            .filter(|l| l.contains("- [ ]") || l.contains("- [x]") || l.contains("- [X]"))
+            .count();
+        let done_tasks: usize = self
+            .text
+            .lines
+            .iter()
+            .filter(|l| l.contains("- [x]") || l.contains("- [X]"))
+            .count();
+
         let mut lines = vec![
             Line::from("Date:"),
             Line::from(self.creation_date.format("%d/%m/%Y").to_string()),
@@ -458,6 +470,13 @@ impl Editor {
             Line::from(""),
             Line::from(format!("Words: {}", word_count)),
         ];
+
+        if total_tasks > 0 {
+            lines.push(Line::from(format!(
+                "Tasks: {}/{} done",
+                done_tasks, total_tasks
+            )));
+        }
 
         if !tags.is_empty() {
             lines.push(Line::from(""));
@@ -510,6 +529,49 @@ impl Editor {
         let paragraph = Paragraph::new(line);
         f.render_widget(paragraph, rect);
     }
+
+    fn toggle_task_checkbox(&mut self) {
+        let line = &mut self.text.lines[self.text.cursor.0];
+        if let Some(pos) = line.find("- [ ]") {
+            line.replace_range(pos..pos + 5, "- [x]");
+        } else if let Some(pos) = line.find("- [x]") {
+            line.replace_range(pos..pos + 5, "- [ ]");
+        } else if let Some(pos) = line.find("- [X]") {
+            line.replace_range(pos..pos + 5, "- [ ]");
+        }
+        self.text.focus = true;
+    }
+}
+
+fn render_task_line(line: &str) -> Line<'static> {
+    if let Some(pos) = line.find("- [ ]") {
+        let before = &line[..pos];
+        let after = &line[pos + 5..];
+        return Line::from(vec![
+            Span::raw(format!("{} ", before)),
+            Span::raw("[ ]").yellow(),
+            Span::raw(format!(" {} ", after)),
+        ]);
+    }
+    if let Some(pos) = line.find("- [x]") {
+        let before = &line[..pos];
+        let after = &line[pos + 5..];
+        return Line::from(vec![
+            Span::raw(format!("{} ", before)),
+            Span::raw("[x]").green(),
+            Span::raw(format!(" {} ", after)).dark_gray(),
+        ]);
+    }
+    if let Some(pos) = line.find("- [X]") {
+        let before = &line[..pos];
+        let after = &line[pos + 5..];
+        return Line::from(vec![
+            Span::raw(format!("{} ", before)),
+            Span::raw("[x]").green(),
+            Span::raw(format!(" {} ", after)).dark_gray(),
+        ]);
+    }
+    Line::from(format!("{} ", line))
 }
 
 fn text_input(text: &mut Text, key: &KeyEvent) {

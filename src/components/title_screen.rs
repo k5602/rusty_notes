@@ -119,12 +119,12 @@ impl TitleScreenComponent {
     }
 
     pub fn handle_event(&mut self, key: KeyEvent) -> Action {
+        if key.code == KeyCode::Char('?') {
+            self.show_help = !self.show_help;
+            return Action::Noop;
+        }
         match &self.state {
             TitleScreenState::Options => match key.code {
-                KeyCode::Char('?') => {
-                    self.show_help = !self.show_help;
-                    Action::Noop
-                }
                 KeyCode::Char('t') => Action::OpenTodaysEntry,
                 KeyCode::Char('o') => {
                     self.state = TitleScreenState::EntryPicker(EntryPicker::new());
