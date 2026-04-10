@@ -1,5 +1,6 @@
-use chrono::{Datelike, Local, NaiveDate};
-use rusqlite::Connection;
+use anyhow::Result;
+use chrono::{Local, NaiveDate};
+use rusqlite::{Connection, params};
 
 use crate::note::Note;
 
@@ -7,94 +8,171 @@ pub struct Database {
     conn: Connection,
 }
 
-impl Default for Database {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Database {
-    pub fn new() -> Self {
-        let conn = Connection::open("./database.db3").expect("Failed to connect to database");
-
-        // Try to create database
-        // No need to check error
-        let _ = conn.execute(
-            "CREATE TABLE note(
-                id              INTEGER PRIMARY KEY,
-                text            TEXT NOT NULL,
-                creation_date   DATE NOT NULL,
-                last_edited     DATETIME NOT NULL
-                )",
-            (),
-        );
-
-        Self { conn }
+    pub fn new(path: &std::path::Path) -> Result<Self> {
+        let conn = Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS note (
+                id INTEGER PRIMARY KEY,
+                text TEXT NOT NULL,
+                creation_date DATE NOT NULL UNIQUE,
+                last_edited DATETIME NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_creation_date ON note(creation_date);",
+        )?;
+        Ok(Self { conn })
     }
 
-    pub fn insert_note(&self, note: &Note) {
-        self.conn
-            .execute(
-                "INSERT INTO note (text, creation_date, last_edited) VALUES (?1, ?2, ?3)",
-                (&note.text, &note.creation_date, &note.last_edited),
-            )
-            .expect("Failed to insert note");
-    }
-
-    pub fn update_note(&self, note: &Note) {
-        self.conn
-            .execute(
-                "UPDATE note
-            SET text = ?2, creation_date = ?3, last_edited = ?4
-            WHERE id = ?1",
-                (&note.id, &note.text, &note.creation_date, &note.last_edited),
-            )
-            .expect("Failed to update note");
-    }
-
-    pub fn get_all_notes(&self) -> Vec<Note> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT * FROM note")
-            .expect("Failed to read notes");
-        stmt.query_map([], |row| {
-            Ok(Note {
-                id: row.get(0)?,
-                text: row.get(1)?,
-                creation_date: row.get(2)?,
-                last_edited: row.get(3)?,
-            })
+    fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
+        Ok(Note {
+            id: row.get(0)?,
+            text: row.get(1)?,
+            creation_date: row.get(2)?,
+            last_edited: row.get(3)?,
         })
-        .unwrap()
-        .map(|note| note.expect("Failed to read Note from database"))
-        .collect()
     }
 
-    pub fn get_or_create_note(&self, creation_date: &NaiveDate) -> Note {
-        if let Some(note) = self.get_all_notes().iter().find(|note| {
-            note.creation_date.year() == creation_date.year()
-                && note.creation_date.month() == creation_date.month()
-                && note.creation_date.day() == creation_date.day()
-        }) {
-            return note.clone();
+    pub fn insert_note(&self, note: &Note) -> Result<i32> {
+        self.conn.execute(
+            "INSERT INTO note (text, creation_date, last_edited) VALUES (?1, ?2, ?3)",
+            params![note.text, note.creation_date, note.last_edited],
+        )?;
+        Ok(self.conn.last_insert_rowid() as i32)
+    }
+
+    pub fn update_note(&self, note: &Note) -> Result<()> {
+        self.conn.execute(
+            "UPDATE note SET text = ?1, last_edited = ?2 WHERE id = ?3",
+            params![note.text, note.last_edited, note.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_note_by_date(&self, date: &NaiveDate) -> Result<Option<Note>> {
+        let result = self.conn.query_row(
+            "SELECT id, text, creation_date, last_edited FROM note WHERE creation_date = ?1",
+            params![date],
+            Self::row_to_note,
+        );
+        match result {
+            Ok(note) => Ok(Some(note)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub fn get_or_create_note(&self, date: &NaiveDate) -> Result<Note> {
+        if let Some(note) = self.get_note_by_date(date)? {
+            return Ok(note);
         }
         let note = Note {
             id: 0,
-            text: String::from(" "),
-            creation_date: *creation_date,
+            text: String::new(),
+            creation_date: *date,
             last_edited: Local::now(),
         };
-        self.insert_note(&note);
-        self.get_or_create_note(creation_date)
+        let id = self.insert_note(&note)?;
+        Ok(Note { id, ..note })
     }
 
-    pub fn insert_or_create_note(&self, note: &Note) {
-        let note_id = self.get_or_create_note(&note.creation_date).id;
-        self.update_note(&Note {
-            id: note_id,
-            text: note.text.clone(),
-            creation_date: note.creation_date,
-            last_edited: note.last_edited,
-        });
+    pub fn upsert_note(&self, note: &Note) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO note (text, creation_date, last_edited) VALUES (?1, ?2, ?3)
+             ON CONFLICT(creation_date) DO UPDATE SET text = excluded.text, last_edited = excluded.last_edited",
+            params![note.text, note.creation_date, note.last_edited],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_all_notes(&self) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, creation_date, last_edited FROM note ORDER BY creation_date",
+        )?;
+        let mut notes = Vec::new();
+        for note in stmt.query_map([], Self::row_to_note)? {
+            notes.push(note?);
+        }
+        Ok(notes)
+    }
+
+    pub fn get_notes_in_range(&self, start: &NaiveDate, end: &NaiveDate) -> Result<Vec<Note>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, text, creation_date, last_edited FROM note
+             WHERE creation_date BETWEEN ?1 AND ?2 ORDER BY creation_date",
+        )?;
+        let mut notes = Vec::new();
+        for note in stmt.query_map(params![start, end], Self::row_to_note)? {
+            notes.push(note?);
+        }
+        Ok(notes)
+    }
+
+    pub fn get_dates_with_notes(&self, year: i32, month: u32) -> Result<Vec<NaiveDate>> {
+        let start = NaiveDate::from_ymd_opt(year, month, 1)
+            .ok_or_else(|| anyhow::anyhow!("invalid year {year}, month {month}"))?;
+        let next_month = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .ok_or_else(|| anyhow::anyhow!("invalid date range end"))?;
+        let end = next_month
+            .pred_opt()
+            .ok_or_else(|| anyhow::anyhow!("invalid date range"))?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT creation_date FROM note WHERE creation_date BETWEEN ?1 AND ?2 ORDER BY creation_date",
+        )?;
+        let mut dates = Vec::new();
+        for date in stmt.query_map(params![start, end], |row| row.get::<_, NaiveDate>(0))? {
+            dates.push(date?);
+        }
+        Ok(dates)
+    }
+
+    pub fn get_total_word_count(&self) -> Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT text FROM note")?;
+        let mut count = 0;
+        for word_count in stmt.query_map([], |row| {
+            let text: String = row.get(0)?;
+            Ok(text.split_whitespace().count())
+        })? {
+            count += word_count?;
+        }
+        Ok(count)
+    }
+
+    pub fn get_note_count(&self) -> Result<usize> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM note", [], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
+    pub fn append_to_note(&self, date: &NaiveDate, text: &str) -> Result<()> {
+        let now = Local::now();
+        match self.get_note_by_date(date)? {
+            Some(note) => {
+                let new_text = if note.text.is_empty() {
+                    text.to_string()
+                } else {
+                    format!("{}\n{}", note.text, text)
+                };
+                self.conn.execute(
+                    "UPDATE note SET text = ?1, last_edited = ?2 WHERE id = ?3",
+                    params![new_text, now, note.id],
+                )?;
+            }
+            None => {
+                let note = Note {
+                    id: 0,
+                    text: text.to_string(),
+                    creation_date: *date,
+                    last_edited: now,
+                };
+                self.insert_note(&note)?;
+            }
+        }
+        Ok(())
     }
 }
